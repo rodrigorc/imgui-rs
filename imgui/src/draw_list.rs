@@ -16,7 +16,7 @@
 use bitflags::bitflags;
 
 use crate::{math::MintVec2, ImColor32};
-use sys::ImDrawList;
+use sys::{ImDrawList, ImDrawCmd};
 
 use super::Ui;
 use crate::render::renderer::TextureId;
@@ -467,6 +467,14 @@ impl<'ui> DrawListMut<'ui> {
         rounding: f32,
     ) -> ImageRounded<'_> {
         ImageRounded::new(self, texture_id, p_min, p_max, rounding)
+    }
+
+    /// Draw the specified callback
+    pub fn add_callback<'f, F: FnOnce() + 'static>(
+        &'ui self,
+        callback: F,
+    ) -> Callback<'ui, F> {
+        Callback::new(self, callback)
     }
 }
 
@@ -1184,5 +1192,52 @@ impl<'ui> ImageRounded<'ui> {
                 self.draw_flags.bits() as i32,
             );
         }
+    }
+}
+
+#[must_use = "should call .build() to draw the object"]
+pub struct Callback<'ui, F> {
+    draw_list: &'ui DrawListMut<'ui>,
+    callback: F,
+}
+
+impl<'ui, F: FnOnce() + 'static> Callback<'ui, F> {
+    /// Typically constructed by [`DrawListMut::add_callback`]
+    pub fn new(
+        draw_list: &'ui DrawListMut<'_>,
+        callback: F,
+    ) -> Self {
+        Callback {
+            draw_list,
+            callback,
+        }
+    }
+
+    /// Draw the image on the window.
+    pub fn build(self) {
+        use std::os::raw::c_void;
+        // F is Sized, so *mut F must be thin pointer
+        let callback: *mut F = Box::into_raw(Box::new(self.callback));
+
+        unsafe {
+            sys::ImDrawList_AddCallback(
+                self.draw_list.draw_list,
+                Some(Self::generic_callback),
+                callback as *mut c_void,
+            );
+        }
+    }
+    unsafe extern "C" fn generic_callback(_parent_list: *const ImDrawList, cmd: *const ImDrawCmd) {
+        let callback: *mut F = (*cmd).UserCallbackData as *mut F;
+        if callback.is_null() {
+            return;
+        }
+        // We are consuming the pointer so leave a NULL behind, to avoid a possible double-free. It
+        // should not happen, but better safe than sorry.
+        // We are modifying through a const pointer, but that should be harmless, as the *const*
+        // means
+        (*(cmd as *mut ImDrawCmd)).UserCallbackData = std::ptr::null_mut();
+        let callback = Box::from_raw(callback);
+        callback();
     }
 }
