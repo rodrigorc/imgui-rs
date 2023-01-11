@@ -6,7 +6,6 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
-//  2023/01/04: fixed a packing issue which in some occurrences would prevent large amount of glyphs from being packed correctly.
 //  2021/08/23: fixed crash when FT_Render_Glyph() fails to render a glyph and returns NULL.
 //  2021/03/05: added ImGuiFreeTypeBuilderFlags_Bitmap to load bitmap glyphs.
 //  2021/03/02: set 'atlas->TexPixelsUseColors = true' to help some backends with deciding of a prefered texture format.
@@ -348,6 +347,36 @@ namespace
             IM_ASSERT(0 && "FreeTypeFont::BlitGlyph(): Unknown bitmap pixel mode!");
         }
     }
+
+    struct ImFontBuildSrcGlyphFT
+    {
+        GlyphInfo           Info;
+        uint32_t            Codepoint;
+        unsigned int*       BitmapData;         // Point within one of the dst_tmp_bitmap_buffers[] array
+
+        ImFontBuildSrcGlyphFT() { memset(this, 0, sizeof(*this)); }
+    };
+
+    struct ImFontBuildSrcDataFT
+    {
+        FreeTypeFont        Font;
+        stbrp_rect*         Rects;              // Rectangle to pack. We first fill in their size and the packer will give us their position.
+        const ImWchar*      SrcRanges;          // Ranges as requested by user (user is allowed to request too much, e.g. 0x0020..0xFFFF)
+        int                 DstIndex;           // Index into atlas->Fonts[] and dst_tmp_array[]
+        int                 GlyphsHighest;      // Highest requested codepoint
+        int                 GlyphsCount;        // Glyph count (excluding missing glyphs and glyphs already set by an earlier source font)
+        ImBitVector         GlyphsSet;          // Glyph bit map (random access, 1-bit per codepoint. This will be a maximum of 8KB)
+        ImVector<ImFontBuildSrcGlyphFT>   GlyphsList;
+    };
+
+    // Temporary data for one destination ImFont* (multiple source fonts can be merged into one destination ImFont)
+    struct ImFontBuildDstDataFT
+    {
+        int                 SrcCount;           // Number of source fonts targeting this destination font.
+        int                 GlyphsHighest;
+        int                 GlyphsCount;
+        ImBitVector         GlyphsSet;          // This is used to resolve collision when multiple sources are merged into a same destination font.
+    };
 }
 
 #ifndef STB_RECT_PACK_IMPLEMENTATION                        // in case the user already have an implementation in the _same_ compilation unit (e.g. unity builds)
@@ -362,36 +391,6 @@ namespace
 #include "imstb_rectpack.h"
 #endif
 #endif
-
-struct ImFontBuildSrcGlyphFT
-{
-    GlyphInfo           Info;
-    uint32_t            Codepoint;
-    unsigned int*       BitmapData;         // Point within one of the dst_tmp_bitmap_buffers[] array
-
-    ImFontBuildSrcGlyphFT() { memset((void*)this, 0, sizeof(*this)); }
-};
-
-struct ImFontBuildSrcDataFT
-{
-    FreeTypeFont        Font;
-    stbrp_rect*         Rects;              // Rectangle to pack. We first fill in their size and the packer will give us their position.
-    const ImWchar*      SrcRanges;          // Ranges as requested by user (user is allowed to request too much, e.g. 0x0020..0xFFFF)
-    int                 DstIndex;           // Index into atlas->Fonts[] and dst_tmp_array[]
-    int                 GlyphsHighest;      // Highest requested codepoint
-    int                 GlyphsCount;        // Glyph count (excluding missing glyphs and glyphs already set by an earlier source font)
-    ImBitVector         GlyphsSet;          // Glyph bit map (random access, 1-bit per codepoint. This will be a maximum of 8KB)
-    ImVector<ImFontBuildSrcGlyphFT>   GlyphsList;
-};
-
-// Temporary data for one destination ImFont* (multiple source fonts can be merged into one destination ImFont)
-struct ImFontBuildDstDataFT
-{
-    int                 SrcCount;           // Number of source fonts targeting this destination font.
-    int                 GlyphsHighest;
-    int                 GlyphsCount;
-    ImBitVector         GlyphsSet;          // This is used to resolve collision when multiple sources are merged into a same destination font.
-};
 
 bool ImFontAtlasBuildWithFreeTypeEx(FT_Library ft_library, ImFontAtlas* atlas, unsigned int extra_flags)
 {
@@ -509,7 +508,7 @@ bool ImFontAtlasBuildWithFreeTypeEx(FT_Library ft_library, ImFontAtlas* atlas, u
     // Allocate temporary rasterization data buffers.
     // We could not find a way to retrieve accurate glyph size without rendering them.
     // (e.g. slot->metrics->width not always matching bitmap->width, especially considering the Oblique transform)
-    // We allocate in chunks of 256 KB to not waste too much extra memory ahead. Hopefully users of FreeType won't mind the temporary allocations.
+    // We allocate in chunks of 256 KB to not waste too much extra memory ahead. Hopefully users of FreeType won't find the temporary allocations.
     const int BITMAP_BUFFERS_CHUNK_SIZE = 256 * 1024;
     int buf_bitmap_current_used_bytes = 0;
     ImVector<unsigned char*> buf_bitmap_buffers;
@@ -557,7 +556,6 @@ bool ImFontAtlasBuildWithFreeTypeEx(FT_Library ft_library, ImFontAtlas* atlas, u
                 buf_bitmap_current_used_bytes = 0;
                 buf_bitmap_buffers.push_back((unsigned char*)IM_ALLOC(BITMAP_BUFFERS_CHUNK_SIZE));
             }
-            IM_ASSERT(buf_bitmap_current_used_bytes + bitmap_size_in_bytes <= BITMAP_BUFFERS_CHUNK_SIZE); // We could probably allocate custom-sized buffer instead.
 
             // Blit rasterized pixels to our temporary buffer and keep a pointer to it.
             src_glyph.BitmapData = (unsigned int*)(buf_bitmap_buffers.back() + buf_bitmap_current_used_bytes);
@@ -587,7 +585,7 @@ bool ImFontAtlasBuildWithFreeTypeEx(FT_Library ft_library, ImFontAtlas* atlas, u
     ImVector<stbrp_node> pack_nodes;
     pack_nodes.resize(num_nodes_for_packing_algorithm);
     stbrp_context pack_context;
-    stbrp_init_target(&pack_context, atlas->TexWidth - atlas->TexGlyphPadding, TEX_HEIGHT_MAX - atlas->TexGlyphPadding, pack_nodes.Data, pack_nodes.Size);
+    stbrp_init_target(&pack_context, atlas->TexWidth, TEX_HEIGHT_MAX, pack_nodes.Data, pack_nodes.Size);
     ImFontAtlasBuildPackCustomRects(atlas, &pack_context);
 
     // 6. Pack each source font. No rendering yet, we are working with rectangles in an infinitely tall texture at this point.
