@@ -294,7 +294,7 @@ impl Ui {
 /// directly, with a few deprecated helper methods here.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Hash)]
-pub struct Id(pub(crate) u32);
+pub struct Id(pub(crate) sys::ImGuiID);
 
 impl Id {
     #[deprecated(since = "0.8.0", note = "Use ui.new_id_int(...)")]

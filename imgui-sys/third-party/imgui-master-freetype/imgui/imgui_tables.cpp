@@ -332,11 +332,7 @@ bool    ImGui::BeginTableEx(const char* name, ImGuiID id, int columns_count, ImG
 
     // Acquire storage for the table
     ImGuiTable* table = g.Tables.GetOrAddByKey(id);
-    const int instance_no = (table->LastFrameActive != g.FrameCount) ? 0 : table->InstanceCurrent + 1;
-    const ImGuiID instance_id = id + instance_no;
     const ImGuiTableFlags table_last_flags = table->Flags;
-    if (instance_no > 0)
-        IM_ASSERT(table->ColumnsCount == columns_count && "BeginTable(): Cannot change columns count mid-frame while preserving same ID");
 
     // Acquire temporary buffers
     const int table_idx = g.Tables.GetIndex(table);
@@ -352,17 +348,34 @@ bool    ImGui::BeginTableEx(const char* name, ImGuiID id, int columns_count, ImG
     flags = TableFixFlags(flags, outer_window);
 
     // Initialize
+    const int instance_no = (table->LastFrameActive != g.FrameCount) ? 0 : table->InstanceCurrent + 1;
     table->ID = id;
     table->Flags = flags;
-    table->InstanceCurrent = (ImS16)instance_no;
     table->LastFrameActive = g.FrameCount;
     table->OuterWindow = table->InnerWindow = outer_window;
     table->ColumnsCount = columns_count;
     table->IsLayoutLocked = false;
     table->InnerWidth = inner_width;
     temp_data->UserOuterSize = outer_size;
-    if (instance_no > 0 && table->InstanceDataExtra.Size < instance_no)
-        table->InstanceDataExtra.push_back(ImGuiTableInstanceData());
+
+    // Instance data (for instance 0, TableID == TableInstanceID)
+    ImGuiID instance_id;
+    table->InstanceCurrent = (ImS16)instance_no;
+    if (instance_no > 0)
+    {
+        IM_ASSERT(table->ColumnsCount == columns_count && "BeginTable(): Cannot change columns count mid-frame while preserving same ID");
+        if (table->InstanceDataExtra.Size < instance_no)
+            table->InstanceDataExtra.push_back(ImGuiTableInstanceData());
+        char instance_desc[12];
+        int instance_desc_len = ImFormatString(instance_desc, IM_ARRAYSIZE(instance_desc), "##Instance%d", instance_no);
+        instance_id = GetIDWithSeed(instance_desc, instance_desc + instance_desc_len, id);
+    }
+    else
+    {
+        instance_id = id;
+    }
+    ImGuiTableInstanceData* table_instance = TableGetInstanceData(table, table->InstanceCurrent);
+    table_instance->TableInstanceID = instance_id;
 
     // When not using a child window, WorkRect.Max will grow as we append contents.
     if (use_child_window)
@@ -412,7 +425,9 @@ bool    ImGui::BeginTableEx(const char* name, ImGuiID id, int columns_count, ImG
     }
 
     // Push a standardized ID for both child-using and not-child-using tables
-    PushOverrideID(instance_id);
+    PushOverrideID(id);
+    if (instance_no > 0)
+        PushOverrideID(instance_id); // FIXME: Somehow this is not resolved by stack-tool, even tho GetIDWithSeed() submitted the symbol.
 
     // Backup a copy of host window members we will modify
     ImGuiWindow* inner_window = table->InnerWindow;
@@ -547,7 +562,7 @@ bool    ImGui::BeginTableEx(const char* name, ImGuiID id, int columns_count, ImG
     if (table->RefScale != 0.0f && table->RefScale != new_ref_scale_unit)
     {
         const float scale_factor = new_ref_scale_unit / table->RefScale;
-        //IMGUI_DEBUG_PRINT("[table] %08X RefScaleUnit %.3f -> %.3f, scaling width by %.3f\n", table->ID, table->RefScaleUnit, new_ref_scale_unit, scale_factor);
+        //IMGUI_DEBUG_PRINT("[table] " IMGUI_HASH_FMT " RefScaleUnit %.3f -> %.3f, scaling width by %.3f\n", table->ID, table->RefScaleUnit, new_ref_scale_unit, scale_factor);
         for (int n = 0; n < columns_count; n++)
             table->Columns[n].WidthRequest = table->Columns[n].WidthRequest * scale_factor;
     }
@@ -1345,8 +1360,10 @@ void    ImGui::EndTable()
     }
 
     // Pop from id stack
-    IM_ASSERT_USER_ERROR(inner_window->IDStack.back() == table->ID + table->InstanceCurrent, "Mismatching PushID/PopID!");
+    IM_ASSERT_USER_ERROR(inner_window->IDStack.back() == table_instance->TableInstanceID, "Mismatching PushID/PopID!");
     IM_ASSERT_USER_ERROR(outer_window->DC.ItemWidthStack.Size >= temp_data->HostBackupItemWidthStackSize, "Too many PopItemWidth!");
+    if (table->InstanceCurrent > 0)
+        PopID();
     PopID();
 
     // Restore window data that we modified
@@ -1616,11 +1633,11 @@ ImRect ImGui::TableGetCellBgRect(const ImGuiTable* table, int column_n)
 }
 
 // Return the resizing ID for the right-side of the given column.
-ImGuiID ImGui::TableGetColumnResizeID(const ImGuiTable* table, int column_n, int instance_no)
+ImGuiID ImGui::TableGetColumnResizeID(ImGuiTable* table, int column_n, int instance_no)
 {
     IM_ASSERT(column_n >= 0 && column_n < table->ColumnsCount);
-    ImGuiID id = table->ID + 1 + (instance_no * table->ColumnsCount) + column_n;
-    return id;
+    ImGuiID instance_id = TableGetInstanceID(table, instance_no);
+    return instance_id + 1 + column_n; // FIXME: #6140: still not ideal
 }
 
 // Return -1 when table is not hovered. return columns_count if the unused space at the right of visible columns is hovered.
@@ -2870,10 +2887,9 @@ void ImGui::TableHeadersRow()
             continue;
 
         // Push an id to allow unnamed labels (generally accidental, but let's behave nicely with them)
-        // - in your own code you may omit the PushID/PopID all-together, provided you know they won't collide
-        // - table->InstanceCurrent is only >0 when we use multiple BeginTable/EndTable calls with same identifier.
+        // In your own code you may omit the PushID/PopID all-together, provided you know they won't collide.
         const char* name = (TableGetColumnFlags(column_n) & ImGuiTableColumnFlags_NoHeaderLabel) ? "" : TableGetColumnName(column_n);
-        PushID(table->InstanceCurrent * table->ColumnsCount + column_n);
+        PushID(column_n);
         TableHeader(name);
         PopID();
     }
@@ -3388,7 +3404,7 @@ static void* TableSettingsHandler_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*,
 {
     ImGuiID id = 0;
     int columns_count = 0;
-    if (sscanf(name, "0x%08X,%d", &id, &columns_count) < 2)
+    if (sscanf(name, "0x" IMGUI_HASH_FMT ",%d", &id, &columns_count) < 2)
         return NULL;
 
     if (ImGuiTableSettings* settings = ImGui::TableSettingsFindByID(id))
@@ -3409,6 +3425,7 @@ static void TableSettingsHandler_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, 
     ImGuiTableSettings* settings = (ImGuiTableSettings*)entry;
     float f = 0.0f;
     int column_n = 0, r = 0, n = 0;
+    ImGuiID id = 0;
 
     if (sscanf(line, "RefScale=%f", &f) == 1) { settings->RefScale = f; return; }
 
@@ -3420,7 +3437,7 @@ static void TableSettingsHandler_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, 
         char c = 0;
         ImGuiTableColumnSettings* column = settings->GetColumnSettings() + column_n;
         column->Index = (ImGuiTableColumnIdx)column_n;
-        if (sscanf(line, "UserID=0x%08X%n", (ImU32*)&n, &r)==1) { line = ImStrSkipBlank(line + r); column->UserID = (ImGuiID)n; }
+        if (sscanf(line, "UserID=0x" IMGUI_HASH_FMT "%n", &id, &r)==1) { line = ImStrSkipBlank(line + r); column->UserID = id; }
         if (sscanf(line, "Width=%d%n", &n, &r) == 1)            { line = ImStrSkipBlank(line + r); column->WidthOrWeight = (float)n; column->IsStretch = 0; settings->SaveFlags |= ImGuiTableFlags_Resizable; }
         if (sscanf(line, "Weight=%f%n", &f, &r) == 1)           { line = ImStrSkipBlank(line + r); column->WidthOrWeight = f; column->IsStretch = 1; settings->SaveFlags |= ImGuiTableFlags_Resizable; }
         if (sscanf(line, "Visible=%d%n", &n, &r) == 1)          { line = ImStrSkipBlank(line + r); column->IsEnabled = (ImU8)n; settings->SaveFlags |= ImGuiTableFlags_Hideable; }
@@ -3447,7 +3464,7 @@ static void TableSettingsHandler_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandle
             continue;
 
         buf->reserve(buf->size() + 30 + settings->ColumnsCount * 50); // ballpark reserve
-        buf->appendf("[%s][0x%08X,%d]\n", handler->TypeName, settings->ID, settings->ColumnsCount);
+        buf->appendf("[%s][0x" IMGUI_HASH_FMT ",%d]\n", handler->TypeName, settings->ID, settings->ColumnsCount);
         if (settings->RefScale != 0.0f)
             buf->appendf("RefScale=%g\n", settings->RefScale);
         ImGuiTableColumnSettings* column = settings->GetColumnSettings();
@@ -3458,7 +3475,7 @@ static void TableSettingsHandler_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandle
             if (!save_column)
                 continue;
             buf->appendf("Column %-2d", column_n);
-            if (column->UserID != 0)                    buf->appendf(" UserID=%08X", column->UserID);
+            if (column->UserID != 0)                    buf->appendf(" UserID=" IMGUI_HASH_FMT, column->UserID);
             if (save_size && column->IsStretch)         buf->appendf(" Weight=%.4f", column->WidthOrWeight);
             if (save_size && !column->IsStretch)        buf->appendf(" Width=%d", (int)column->WidthOrWeight);
             if (save_visible)                           buf->appendf(" Visible=%d", column->IsEnabled);
@@ -3494,7 +3511,7 @@ void ImGui::TableSettingsAddSettingsHandler()
 // Remove Table (currently only used by TestEngine)
 void ImGui::TableRemove(ImGuiTable* table)
 {
-    //IMGUI_DEBUG_PRINT("TableRemove() id=0x%08X\n", table->ID);
+    //IMGUI_DEBUG_PRINT("TableRemove() id=0x" IMGUI_HASH_FMT "\n", table->ID);
     ImGuiContext& g = *GImGui;
     int table_idx = g.Tables.GetIndex(table);
     //memset(table->RawData.Data, 0, table->RawData.size_in_bytes());
@@ -3506,7 +3523,7 @@ void ImGui::TableRemove(ImGuiTable* table)
 // Free up/compact internal Table buffers for when it gets unused
 void ImGui::TableGcCompactTransientBuffers(ImGuiTable* table)
 {
-    //IMGUI_DEBUG_PRINT("TableGcCompactTransientBuffers() id=0x%08X\n", table->ID);
+    //IMGUI_DEBUG_PRINT("TableGcCompactTransientBuffers() id=0x" IMGUI_HASH_FMT "\n", table->ID);
     ImGuiContext& g = *GImGui;
     IM_ASSERT(table->MemoryCompacted == false);
     table->SortSpecs.Specs = NULL;
@@ -3568,7 +3585,7 @@ void ImGui::DebugNodeTable(ImGuiTable* table)
     char* p = buf;
     const char* buf_end = buf + IM_ARRAYSIZE(buf);
     const bool is_active = (table->LastFrameActive >= ImGui::GetFrameCount() - 2); // Note that fully clipped early out scrolling tables will appear as inactive here.
-    ImFormatString(p, buf_end - p, "Table 0x%08X (%d columns, in '%s')%s", table->ID, table->ColumnsCount, table->OuterWindow->Name, is_active ? "" : " *Inactive*");
+    ImFormatString(p, buf_end - p, "Table 0x" IMGUI_HASH_FMT " (%d columns, in '%s')%s", table->ID, table->ColumnsCount, table->OuterWindow->Name, is_active ? "" : " *Inactive*");
     if (!is_active) { PushStyleColor(ImGuiCol_Text, GetStyleColorVec4(ImGuiCol_TextDisabled)); }
     bool open = TreeNode(table, "%s", buf);
     if (!is_active) { PopStyleColor(); }
@@ -3601,7 +3618,7 @@ void ImGui::DebugNodeTable(ImGuiTable* table)
             "WidthGiven: %.1f, Request/Auto: %.1f/%.1f, StretchWeight: %.3f (%.1f%%)\n"
             "MinX: %.1f, MaxX: %.1f (%+.1f), ClipRect: %.1f to %.1f (+%.1f)\n"
             "ContentWidth: %.1f,%.1f, HeadersUsed/Ideal %.1f/%.1f\n"
-            "Sort: %d%s, UserID: 0x%08X, Flags: 0x%04X: %s%s%s..",
+            "Sort: %d%s, UserID: 0x" IMGUI_HASH_FMT ", Flags: 0x%04X: %s%s%s..",
             n, column->DisplayOrder, name, column->MinX - table->WorkRect.Min.x, column->MaxX - table->WorkRect.Min.x, (n < table->FreezeColumnsRequest) ? " (Frozen)" : "",
             column->IsEnabled, column->IsVisibleX, column->IsVisibleY, column->IsRequestOutput, column->IsSkipItems, column->DrawChannelFrozen, column->DrawChannelUnfrozen,
             column->WidthGiven, column->WidthRequest, column->WidthAuto, column->StretchWeight, column->StretchWeight > 0.0f ? (column->StretchWeight / sum_weights) * 100.0f : 0.0f,
@@ -3628,7 +3645,7 @@ void ImGui::DebugNodeTable(ImGuiTable* table)
 
 void ImGui::DebugNodeTableSettings(ImGuiTableSettings* settings)
 {
-    if (!TreeNode((void*)(intptr_t)settings->ID, "Settings 0x%08X (%d columns)", settings->ID, settings->ColumnsCount))
+    if (!TreeNode((void*)(intptr_t)settings->ID, "Settings 0x" IMGUI_HASH_FMT " (%d columns)", settings->ID, settings->ColumnsCount))
         return;
     BulletText("SaveFlags: 0x%08X", settings->SaveFlags);
     BulletText("ColumnsCount: %d (max %d)", settings->ColumnsCount, settings->ColumnsCountMax);
@@ -3636,7 +3653,7 @@ void ImGui::DebugNodeTableSettings(ImGuiTableSettings* settings)
     {
         ImGuiTableColumnSettings* column_settings = &settings->GetColumnSettings()[n];
         ImGuiSortDirection sort_dir = (column_settings->SortOrder != -1) ? (ImGuiSortDirection)column_settings->SortDirection : ImGuiSortDirection_None;
-        BulletText("Column %d Order %d SortOrder %d %s Vis %d %s %7.3f UserID 0x%08X",
+        BulletText("Column %d Order %d SortOrder %d %s Vis %d %s %7.3f UserID 0x" IMGUI_HASH_FMT,
             n, column_settings->DisplayOrder, column_settings->SortOrder,
             (sort_dir == ImGuiSortDirection_Ascending) ? "Asc" : (sort_dir == ImGuiSortDirection_Descending) ? "Des" : "---",
             column_settings->IsEnabled, column_settings->IsStretch ? "Weight" : "Width ", column_settings->WidthOrWeight, column_settings->UserID);
