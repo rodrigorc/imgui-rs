@@ -1820,6 +1820,83 @@ void ImFormatStringToTempBufferV(const char** out_buf, const char** out_buf_end,
     if (out_buf_end) { *out_buf_end = g.TempBuffer.Data + buf_len; }
 }
 
+#define FASTHASH
+#ifdef FASTHASH
+//fasthash
+
+/////////////////////////
+
+static inline ImU64 fasthash_mix(ImU64 h)
+{
+    h ^= h >> 23;
+    h *= 0x2127599bf4325c37ULL;
+    h ^= h >> 47;
+    return h;
+}
+
+static ImU64 fasthash64(const void *buf, size_t len, ImU64 seed)
+{
+    const ImU64 m = 0x880355f21e6d1965ULL;
+    const unsigned char *pos = (const unsigned char *)buf;
+    const unsigned char *end = pos + (len / 8) * 8;
+    ImU64 h = seed ^ (len * m);
+    ImU64 v;
+
+    while (pos != end) {
+        // Beware of unaligned data, a good compiler in an architecture that allows
+        // unaligned access should compile this into a singlea load instruction.
+        memcpy(&v, pos, 8);
+        pos += 8;
+        h ^= fasthash_mix(v);
+        h *= m;
+    }
+
+    v = 0;
+
+    switch (len & 7) {
+    case 7: v ^= (ImU64)pos[6] << 48;
+    case 6: v ^= (ImU64)pos[5] << 40;
+    case 5: v ^= (ImU64)pos[4] << 32;
+    case 4: v ^= (ImU64)pos[3] << 24;
+    case 3: v ^= (ImU64)pos[2] << 16;
+    case 2: v ^= (ImU64)pos[1] << 8;
+    case 1: v ^= (ImU64)pos[0];
+            h ^= fasthash_mix(v);
+            h *= m;
+    }
+
+    return fasthash_mix(h);
+}
+
+// Known size hash
+// It is ok to call ImHashData on a string with known length but the ### operator won't be supported.
+ImGuiID ImHashData(const void* data_p, size_t data_size, ImU64 seed)
+{
+    if (data_size == 0)
+        return seed;
+    return fasthash64(data_p, data_size, seed);
+}
+
+// Zero-terminated string hash, with support for ### to reset back to seed value
+// We support a syntax of "label###id" where only "###id" is included in the hash, and only "label" gets displayed.
+// - If we reach ### in the string we discard the hash so far and reset to the seed.
+ImGuiID ImHashStr(const char* data_p, size_t data_size, ImU64 seed)
+{
+    if (!data_size)
+    {
+        data_size = strlen(data_p);
+        const void *start = strstr(data_p, "###");
+        if (start)
+        {
+            data_size -= (const char*)start - data_p;
+            data_p = (const char*)start;
+         }
+     }
+    if (data_size == 0)
+        return seed;
+    return fasthash64(data_p, data_size, seed);
+}
+#else
 // CRC32 needs a 1KB lookup table (not cache friendly)
 // Although the code to generate the table is simple and shorter than the table itself, using a const table allows us to easily:
 // - avoid an unnecessary branch/memory tap, - keep the ImHashXXX functions usable by static constructors, - make it thread-safe.
@@ -1889,6 +1966,7 @@ ImGuiID ImHashStr(const char* data_p, size_t data_size, ImU32 seed)
     }
     return ~crc;
 }
+#endif
 
 //-----------------------------------------------------------------------------
 // [SECTION] MISC HELPERS/UTILITIES (File functions)
@@ -9968,7 +10046,7 @@ void ImGui::OpenPopupEx(ImGuiID id, ImGuiPopupFlags popup_flags)
     const int current_stack_size = g.BeginPopupStack.Size;
 
     if (popup_flags & ImGuiPopupFlags_NoOpenOverExistingPopup)
-        if (IsPopupOpen(0u, ImGuiPopupFlags_AnyPopupId))
+        if (IsPopupOpen((ImGuiID)0, ImGuiPopupFlags_AnyPopupId))
             return;
 
     ImGuiPopupData popup_ref; // Tagged as new ref as Window will be set back to NULL if we write this into OpenPopupStack.

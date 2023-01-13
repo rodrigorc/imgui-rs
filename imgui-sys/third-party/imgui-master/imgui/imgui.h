@@ -221,7 +221,6 @@ typedef unsigned short ImDrawIdx;   // Default: 16-bit (for maximum compatibilit
 #endif
 
 // Scalar data types
-typedef unsigned int        ImGuiID;// A unique ID used by widgets (typically the result of hashing a stack of string)
 typedef signed char         ImS8;   // 8-bit signed integer
 typedef unsigned char       ImU8;   // 8-bit unsigned integer
 typedef signed short        ImS16;  // 16-bit signed integer
@@ -230,6 +229,7 @@ typedef signed int          ImS32;  // 32-bit signed integer == int
 typedef unsigned int        ImU32;  // 32-bit unsigned integer (often used to store packed colors)
 typedef signed   long long  ImS64;  // 64-bit signed integer
 typedef unsigned long long  ImU64;  // 64-bit unsigned integer
+typedef ImU64               ImGuiID;// A unique ID used by widgets (typically the result of hashing a stack of string)
 
 // Character types
 // (we generally use UTF-8 encoded string in the API. This is storage specifically for a decoded character used for keyboard input and display)

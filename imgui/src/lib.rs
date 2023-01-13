@@ -284,7 +284,7 @@ impl Ui {
 /// Now, however, it is made from the `Ui` object directly, with a few
 /// deprecated helper methods here.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct Id(pub(crate) u32);
+pub struct Id(pub(crate) sys::ImGuiID);
 
 impl Id {
     #[allow(non_snake_case)]
