@@ -10,7 +10,7 @@ use crate::{sys, Id};
 #[must_use]
 pub struct ChildWindow<'ui> {
     ui: &'ui Ui,
-    id: sys::ImGuiID,
+    id: u32,
     flags: WindowFlags,
     size: [f32; 2],
     content_size: [f32; 2],

@@ -181,7 +181,7 @@ typedef int ImGuiViewportFlags;
 typedef int ImGuiWindowFlags;
 typedef void* ImTextureID;
 typedef unsigned short ImDrawIdx;
-typedef unsigned long long ImGuiID;
+typedef unsigned int ImGuiID;
 typedef signed char ImS8;
 typedef unsigned char ImU8;
 typedef signed short ImS16;
